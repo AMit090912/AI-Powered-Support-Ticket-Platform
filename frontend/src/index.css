@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-paper text-ink font-sans antialiased;
+    background-image:
+      radial-gradient(1100px 600px at 100% -12%, rgba(31, 27, 23, 0.04), transparent 60%),
+      radial-gradient(900px 520px at -12% 112%, rgba(31, 27, 23, 0.035), transparent 55%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+  h1, h2, h3 {
+    @apply font-display;
+  }
+  ::selection {
+    background: rgba(31, 27, 23, 0.13);
+  }
+  *::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgba(31, 27, 23, 0.16);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgba(31, 27, 23, 0.28);
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  .field {
+    @apply w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm text-ink
+           shadow-soft transition placeholder:text-ink-faint
+           focus:border-ink/30 focus:outline-none focus:ring-4 focus:ring-ink/[0.06];
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-ink px-4 py-2.5 text-sm
+           font-medium tracking-tight text-paper shadow-soft transition
+           hover:bg-ink-soft active:scale-[0.99] disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-line bg-surface
+           px-3.5 py-2 text-sm font-medium text-ink-soft transition
+           hover:border-ink/20 hover:bg-paper disabled:pointer-events-none disabled:opacity-40;
+  }
+  .card {
+    @apply rounded-2xl border border-line bg-surface shadow-card;
+  }
+  .label {
+    @apply text-xs font-medium tracking-tight text-ink-soft;
+  }
+}
+
+@layer utilities {
+  .animate-rise {
+    animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
