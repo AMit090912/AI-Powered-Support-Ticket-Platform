@@ -1,231 +1,99 @@
 # Architecture
 
-AI-powered support ticket platform. This document explains the system design, database
-design, authentication strategy, AI integration, how SOLID/KISS shaped the code, and what
-I would improve with more time.
+A support ticket app. Customers raise tickets, agents resolve them, and an AI tags each new
+ticket with a category, priority, and a draft reply.
 
----
+**Stack:** FastAPI + SQLAlchemy + MySQL on the backend, React (Vite + Tailwind) on the
+frontend, JWT for auth, Google Gemini for the AI.
 
-## 1. System Design
+## System design
 
-### Overall topology
-
-```
-┌──────────────┐      HTTPS / JSON      ┌──────────────────────────┐        ┌──────────┐
-│  React SPA   │ ─────────────────────► │   FastAPI backend         │ ─────► │  MySQL   │
-│  (Vercel)    │ ◄───── JWT bearer ──── │  (Render / Railway)       │ ◄───── │          │
-└──────────────┘                        │  routers→services→repos    │        └──────────┘
-                                         │  + AI TriageProvider       │
-                                         └───────────┬───────────────┘
-                                                     │ (on ticket create)
-                                                     ▼
-                                            Google Gemini API
-                                         (fallback: rule-based, in-process)
-```
-
-A decoupled SPA talks to a stateless REST API. The API owns all business rules and
-persistence; the frontend only renders state and calls endpoints. The backend is a
-long-running server (not serverless) so it keeps a real SQLAlchemy connection pool to MySQL.
-
-### Frontend architecture
-
-- **React + Vite + Tailwind**, with **React Router** for routing and **React Query** for all
-  server state (fetching, caching, loading/error states, cache invalidation on mutations).
-- A single **`apiClient`** (axios) attaches the JWT from `localStorage` on every request and,
-  on a `401`, clears the token and redirects to `/login`.
-- An **`AuthProvider`** context exposes `login`/`register`/`logout` and the current user
-  (loaded from `/auth/me`). **`ProtectedRoute`** guards pages and enforces role (`customer`
-  vs `agent`), redirecting appropriately.
-- Pages: Login, Register, Customer Dashboard (own tickets + create), Agent Dashboard (all
-  tickets + search/filter/pagination + analytics widget), Ticket Detail (info, comments,
-  activity timeline, and agent-only status/priority/assignee controls + AI suggested response).
-- Loading (`Spinner`), error (`ErrorBox`), and empty (`EmptyState`) states are used throughout.
-
-### Backend architecture (layered)
+The frontend and backend are separate. React is just the UI — it calls the backend over REST
+and shows what comes back. The backend holds all the logic and talks to MySQL. Gemini is only
+called when a ticket is created.
 
 ```
-app/
-  core/         config (pydantic-settings/.env), database (engine/session), security (JWT, bcrypt)
-  models/       SQLAlchemy ORM + enums
-  schemas/      Pydantic request/response DTOs (validation + serialization)
-  repositories/ data access (one class per aggregate)
-  services/     business logic + RBAC + activity logging
-  ai/           TriageProvider interface, GeminiProvider, RuleBasedProvider, factory
-  api/          deps.py (DI wiring, auth guards) + routers/ (thin HTTP controllers)
-  main.py       app factory, CORS, global domain→HTTP exception handlers
+React (Vercel)  →  FastAPI (Render)  →  MySQL
+                        ↓ on create
+                   Gemini  (falls back to keyword rules if it fails)
 ```
 
-Each layer has a single responsibility and depends only on the layer beneath it through a
-narrow interface:
+The backend is split into layers so each part has one job:
 
-- **Routers** parse/validate HTTP, call a service, and shape the response. No business logic.
-- **Services** hold all rules (who can do what, when to log activity, how to triage). They
-  depend on **repository** and **provider abstractions** injected via FastAPI dependencies —
-  never on a concrete `Session` or the Gemini SDK directly. This is what makes them unit-testable.
-- **Repositories** encapsulate all SQLAlchemy queries; swapping the query layer or database
-  doesn't touch services.
-- **Domain exceptions** (`NotFoundError`, `ForbiddenError`, `ConflictError`) are raised by
-  services and mapped to HTTP status codes (404/403/409) by global handlers in `main.py`,
-  keeping HTTP concerns out of the service layer.
+- **routers** – handle the HTTP request and response
+- **services** – the actual rules: permissions, when to log activity, calling the AI
+- **repositories** – the database queries
+- **models / schemas** – the DB tables and the request/response shapes
 
----
+Services never touch the database or Gemini directly — those are passed in. I did that mainly so
+I can test the rules with fakes, and so changing the database or AI provider doesn't break the
+logic.
 
-## 2. Database Design
+On the frontend: React Router for pages, React Query for data fetching (it gives me caching and
+loading/error states), and one axios client that attaches the JWT to every request and sends you
+to login on a 401. A `ProtectedRoute` decides what customers vs agents can see.
 
-### Entities
+## Database
 
-- **User** — `id, email (unique), hashed_password, full_name, role(customer|agent), created_at`
-- **Ticket** — `id, title, description, status, priority, category, suggested_response,
-  created_by_id → User, assigned_to_id → User (nullable), created_at, updated_at`
-- **Comment** — `id, ticket_id → Ticket, author_id → User, body, created_at`
-- **ActivityEvent** — `id, ticket_id → Ticket, actor_id → User (nullable),
-  event_type, old_value, new_value, created_at`
+Four tables: **User, Ticket, Comment, ActivityEvent**.
 
-### Relationships
+- A user creates many tickets, and an agent can be assigned many — so a ticket links to User
+  twice (creator and assignee).
+- Comments and activity events belong to a ticket.
 
-```
-User 1───N Ticket   (as creator,  created_by_id)
-User 1───N Ticket   (as assignee, assigned_to_id, nullable)
-Ticket 1───N Comment
-Ticket 1───N ActivityEvent
-User 1───N Comment / ActivityEvent (author/actor)
-```
+A few decisions worth calling out:
 
-`Ticket` declares **two** relationships to `User` (creator and assignee) with explicit
-`foreign_keys=` to disambiguate the join.
+- Status, priority, category and role are **enums**, so invalid values can't be saved.
+- **ActivityEvent** is a separate table that records each change (what changed, from what, to
+  what, by whom). That's the activity history — simpler than comparing old copies of a ticket.
+- The AI's suggested reply is saved on the ticket once at creation, not regenerated every time.
 
-### Design decisions
+On **MySQL vs SQLite**: the brief said SQLite, but I used MySQL. Since everything goes through
+SQLAlchemy, the tests run on in-memory SQLite (fast, no server needed) while the real app runs on
+MySQL. There's a small risk the two behave differently, so I stuck to standard queries.
 
-- **Enums in the schema** (`status`, `priority`, `category`, `role`, `event_type`) make
-  invalid states unrepresentable at both the API (Pydantic) and DB level. Each enum member's
-  name equals its value, so storage is stable and human-readable.
-- **Dedicated `ActivityEvent` table** powers the required activity history / audit trail. It
-  records old→new transitions, so the timeline is reconstructable without diffing snapshots.
-- **`suggested_response` stored on the ticket** (generated once at creation) rather than
-  recomputed — cheaper and deterministic for display.
-- **`updated_at` (auto `onupdate`)** approximates resolution time for analytics (creation →
-  resolving update).
-- **Indexes** on `email`, `title`, `status`, `priority`, `category`, `created_by_id`,
-  `assigned_to_id`, and `ticket_id` to support the search/filter/list queries.
+## Authentication
 
-### Database choice & trade-off (MySQL vs SQLite)
+JWT. On login you get a signed token holding your user id and role, and the frontend sends it on
+every request. Passwords are hashed with bcrypt, never stored as plain text.
 
-The original brief's tech-stack line listed **SQLite**; per instruction this implementation
-uses **MySQL**. Because all data access goes through SQLAlchemy with no raw, dialect-specific
-SQL, the application is portable across both. We exploit this in the test suite: **integration
-tests run against in-memory SQLite** (fast, hermetic, no server needed) while **production runs
-on MySQL**.
+Permissions are checked in two places: at the route level for agent-only endpoints, and inside
+the services for finer rules like "a customer can only see their own tickets."
 
-- **Benefit:** fast CI with zero infra; identical ORM code paths in tests and prod.
-- **Risk:** a MySQL-only behavior (e.g., a dialect-specific function or collation) could pass
-  in SQLite but fail in MySQL. Mitigated by keeping queries to portable SQLAlchemy constructs.
-  A production-hardening step would add a CI job running the same integration tests against a
-  real MySQL container.
+I chose JWT because it's stateless — no session store to manage, and it fits a separate frontend
+cleanly. The trade-off is you can't cancel a token before it expires (so I keep them
+short-lived), and keeping it in `localStorage` is simple but exposed to XSS. A production version
+would add refresh tokens and store it in a secure cookie.
 
----
+## AI integration
 
-## 3. Authentication Strategy
+When a ticket is created, Gemini reads the title and description and returns a category, a
+priority, and a draft reply for the agent.
 
-### Approach: JWT bearer tokens
+It's wired behind one interface, `TriageProvider`, with two implementations: `GeminiProvider`
+(the real AI) and `RuleBasedProvider` (keyword matching). A `SafeTriageProvider` wraps the real
+one and falls back to the rule-based one if anything goes wrong. The ticket service only knows
+about the interface, so swapping providers doesn't change it.
 
-- On register, the password is hashed with **bcrypt** (passlib). On login, credentials are
-  verified and a signed **JWT** is returned containing `sub` (user id) and `role`.
-- The frontend stores the token and sends it as `Authorization: Bearer <token>`.
-- A `get_current_user` dependency decodes/validates the token and loads the user; a
-  `require_agent` dependency gates agent-only endpoints. **Authorization is enforced in two
-  places:** route dependencies for coarse role checks, and the service layer for per-resource
-  ownership (e.g., a customer may only see their own tickets).
+**Prompt:** I ask Gemini to return only JSON with `category`, `priority`, and
+`suggested_response`, restricted to the allowed values, then I validate the reply against those
+values before saving.
 
-### Trade-offs
+**Fallback:** the AI can never block ticket creation. No API key → use the rule-based provider.
+AI errors or returns junk → catch it and use the rule-based provider. So you always get a
+sensible result, with or without a working key. The model used is `gemini-2.0-flash`.
 
-- **Stateless** — no server-side session store; the API scales horizontally and fits a
-  decoupled SPA naturally. JWT also avoids CSRF concerns that cookie sessions carry.
-- **Cost:** tokens can't be revoked before expiry. Mitigated here with a bounded lifetime
-  (`ACCESS_TOKEN_EXPIRE_MINUTES`). Production would add refresh-token rotation and a revocation
-  list (or short-lived access tokens + refresh endpoint).
-- **Token storage:** kept in `localStorage` for simplicity. This is XSS-exposed; a hardened
-  version would use an httpOnly cookie with CSRF protection, or in-memory tokens + silent refresh.
+It runs synchronously when a ticket is created, which is simplest. At higher scale I'd move it to
+a background job so creating a ticket stays instant.
 
----
+## Testing
 
-## 4. AI Integration
+54 tests. Unit tests check the rules using fake repositories and a fake AI provider. Integration
+tests hit the real API (on SQLite) and cover login, ticket create/list/update, search, filtering,
+pagination, permissions, comments, and activity.
 
-### Provider / model
+## If I had more time
 
-Google **Gemini** (`gemini-2.0-flash` by default) via the `google-genai` SDK.
-
-### Design — Strategy pattern behind an interface
-
-```
-TriageProvider (ABC)            triage(title, description) -> TriageResult{category, priority, suggested_response}
- ├── GeminiProvider             calls Gemini, parses & validates JSON against the enums
- └── RuleBasedProvider          deterministic keyword matching + templated response
-
-SafeTriageProvider(primary)     wraps any provider; on ANY exception → RuleBasedProvider
-get_triage_provider(key, model) returns Gemini when a key is set, else RuleBasedProvider
-```
-
-The `TicketService` depends only on the `TriageProvider` interface, so the provider can be
-swapped (or stubbed in tests) with no service changes — this is the Open/Closed and
-Dependency-Inversion principles in practice.
-
-### Prompting strategy
-
-Gemini is prompted to return **only a JSON object** with exactly `category`, `priority`, and
-`suggested_response`, where `category`/`priority` must be one of the allowed enum values. The
-response is stripped of markdown code fences, JSON-parsed, and each field is **validated against
-the Python enums** (`Category(...)`, `Priority(...)`). Any missing key, bad JSON, or
-out-of-range value raises a `ValueError`.
-
-### Fallback handling
-
-Triage **never blocks ticket creation**. Two layers of safety:
-
-1. **No key / SDK init failure** → `get_triage_provider` returns `RuleBasedProvider` directly.
-2. **Runtime failure** (timeout, network, malformed/invalid response) → `SafeTriageProvider`
-   catches it and falls back to `RuleBasedProvider`, which maps keywords to a category/priority
-   and returns a templated suggested response.
-
-This means the platform produces a sensible category, priority, and draft response **with or
-without** a working Gemini key — satisfying the "reasonable fallback mechanism" requirement.
-
-### Why synchronous triage
-
-Triage runs inline during `POST /tickets` for simplicity (KISS) and immediate feedback. The
-trade-off is added latency on creation and coupling to provider availability — both bounded by
-the fallback. At higher scale this would move to an async job/queue (see Future Improvements).
-
----
-
-## 5. SOLID / KISS in this codebase
-
-- **S**ingle Responsibility — routers (HTTP), services (rules), repositories (persistence),
-  schemas (validation) are separate; one class/file per concern.
-- **O**pen/Closed — new AI providers or repositories can be added without modifying services.
-- **L**iskov — `GeminiProvider` and `RuleBasedProvider` are interchangeable behind `TriageProvider`.
-- **I**nterface Segregation — repositories expose only the methods their service needs.
-- **D**ependency Inversion — services receive abstractions (repos, provider) via FastAPI DI;
-  no service constructs a `Session` or the Gemini client itself.
-- **KISS** — one service per aggregate, four tables, synchronous triage with a fallback,
-  `create_all` instead of migrations at this scale. No event bus, CQRS, or microservices.
-
----
-
-## 6. Future Improvements
-
-If given more time, in rough priority order:
-
-1. **Migrations** — replace `create_all` with Alembic for safe schema evolution.
-2. **Auth hardening** — refresh-token rotation, token revocation, httpOnly-cookie storage,
-   rate limiting on auth endpoints.
-3. **Real-time updates** — WebSockets/SSE so agents see new tickets and comment activity live.
-4. **Notifications** — email/in-app notifications on assignment, status change, and new comments.
-5. **SLA tracking** — ticket aging, due-by timers, and escalation indicators by priority.
-6. **Async AI triage** — move Gemini calls to a background task/queue; show "triaging…" then
-   update, removing provider latency from the creation path. Add prompt/response logging and
-   re-triage on demand.
-7. **Richer analytics** — time-series of volume/resolution, per-agent load, first-response time.
-8. **Search** — MySQL full-text (or OpenSearch) instead of `LIKE` for scale and relevance.
-9. **Frontend tests** — Vitest + React Testing Library for components and hooks.
-10. **CI** — run the integration suite against a real MySQL container in addition to SQLite,
-    plus linting and a build gate.
+Database migrations (Alembic), refresh tokens with cookie storage, real-time updates over
+WebSockets, email/in-app notifications, SLA tracking, moving the AI call to a background job,
+full-text search, and frontend tests.
