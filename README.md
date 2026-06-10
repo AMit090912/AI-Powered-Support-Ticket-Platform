@@ -13,6 +13,21 @@ A full-stack support ticket platform where **customers** create and track ticket
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for design decisions and trade-offs.
 
+## Live Demo
+
+| | URL |
+|---|---|
+| **Frontend** (Vercel) | https://ticket-tau.vercel.app |
+| **Backend API** (Render) | https://ai-powered-support-ticket-platform.onrender.com |
+| **API docs** (Swagger) | https://ai-powered-support-ticket-platform.onrender.com/docs |
+| **Repository** | https://github.com/AMit090912/AI-Powered-Support-Ticket-Platform |
+
+**Demo accounts** (password `password123`):
+- Agent — `agent@demo.com` · Customer — `customer@demo.com`
+
+> ⚠️ The backend is on Render's free tier and **sleeps after ~15 min idle** — the first
+> request may take 30–60s to wake. Reload once and it's responsive.
+
 ---
 
 ## Features
@@ -160,7 +175,9 @@ The seed also creates three sample tickets for the demo customer.
 2. Set `VITE_API_URL=<your-backend-url>`.
 3. Deploy. `frontend/vercel.json` rewrites all routes to `/` so client-side routing works.
 
-> **Live URLs:** _add your deployed frontend and backend URLs here after deploying._
+**Live URLs:**
+- Frontend: https://ticket-tau.vercel.app
+- Backend: https://ai-powered-support-ticket-platform.onrender.com
 
 ---
 
